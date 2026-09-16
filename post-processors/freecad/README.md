@@ -1,8 +1,8 @@
 # FreeCAD Post Processors for nxt
 
-Two posts ship here. The **legacy** post is the original argparse-driven one and is unchanged in behaviour. The **machine** post is a port onto the CAM machine-post API introduced in FreeCAD 26.3, where output options come from a machine definition instead of command-line arguments.
+Two posts ship here. The **legacy** post is the original argparse-driven one and is unchanged in behaviour. The **machine** post is a port onto the CAM machine-post API introduced in FreeCAD 26.3, where output options come from a machine definition instead of command-line arguments. Machine definitions ship for Milo V1.5, V1.6 beta and V2.0, and for Miley V2.0.
 
-Both can be installed at the same time, so you can post the same job through each and compare.
+Both can be installed at the same time, so you can post the same job through each and compare. If you need a version of FreeCAD earlier than 26.3 (ie 1.0 or 1.1), you must use the legacy post.
 
 Targets the **nxt v0.7.0** line.
 
@@ -12,10 +12,66 @@ Targets the **nxt v0.7.0** line.
 |---|---|---|
 | `nxt_legacy_post.py` | `nxt-<version>` | the original post, unchanged behaviour |
 | `nxt_machine_post.py` | `nxt_machine` | machine-flow port |
-| `machines/Milo_V1.5.fcm` | — | Milo V1.5 machine definition |
-| `machines/Milo_V2.fcm` | — | Milo V2.0 machine definition |
-| `machines/Miley_V2.fcm` | — | Miley V2.0 machine definition |
+| `machines/*.fcm` | — | machine definitions, see below |
 | `tools/compare_gcode.py` | — | semantic diff between the two posts' output |
+
+### Included machine definitions
+
+| File | Machine name | Travels (X/Y/Z) | Rapids (X/Y/Z) |
+|---|---|---|---|
+| `machines/Milo_V1.5.fcm` | Milo V1.5 | 340 / 160 / 120 | 2000 / 2000 / 1000 |
+| `machines/Milo_V1.6.fcm` | Milo V1.6 (beta) | 300 / 160 / 120 | 2000 / 2000 / 1000 |
+| `machines/Milo_V2.0.fcm` | Milo V2.0 | 348 / 210 / 120 | 2000 / 2000 / 1000 |
+| `machines/Miley_V2.0.fcm` | Miley V2.0 | 308 / 210 / 120 | 2000 / 2000 / 1000 |
+
+**Every number in these files is a nominal starting point, not a measurement.** Travels are the published figures, quoted minus endstop; your `M208` soft limits will sit a few mm inside them and hard limits may vary based on your build. Rapids are the published V1.5 figures, used for all four because no rapid speed is published for V2 — yours will depend on motors, drive voltage and whether you fitted leadscrews or ballscrews. The stock LDO spindle is described as 1.5 kW running 7200–24000 rpm, but this is just one common configuration among many. You will need to adjust these for your machine!
+
+There is deliberately **one definition per machine rather than one per possible configuration**. Power, rpm range, cooling, motors and drive voltage all vary between builds, and no useful number of shipped variants would cover that. Copy the definition matching your machine and edit it to fit — see the next section.
+
+**V1.6 is beta.** Its travels and rapids are inherited from V1.5, on the basis that the beta retains the V1.5 frame extrusions, linear rails, leadscrews and motors. The XY and Z plates and the anti-backlash block are new and result in some workarea changes, so verify the limits against your own `M208` on a working machine before use.
+
+---
+
+## Check these against your machine
+
+A `.fcm` is plain JSON and can be edited in a text editor or through the CAM Machine editor in FreeCAD (under Preferences → CAM → Assets). Either way FreeCAD re-reads the file on every post, so changes take effect on the next job with no restart. There is also a validator in the machine editor that checks for common errors.
+
+### These change the G-code
+
+Get these right before cutting.
+
+| Field | Where it comes from | What goes wrong if it is off |
+|---|---|---|
+| `machine.toolheads[0].min_rpm` | spindle rating / VFD parameters | `Path/Tool/FeedsSpeeds/resolver.py` clamps any calculated speed up to this floor **and scales feeds by the same ratio** to hold chipload. A floor set too high silently raises your feeds; too low lets the spindle run where it has neither cooling nor torque |
+| `machine.toolheads[0].max_rpm` | as above | speeds above it are clamped down, again rescaling feeds |
+| `postprocessor.properties.nxt_version` | the nxt version in firmware | `M4005` fails and the job will not run |
+
+The shipped floor of 7200 rpm assumes an **air-cooled** spindle, where the shaft fan gives least airflow exactly when torque demand is highest. A water-cooled spindle has no such constraint and can usually take a considerably lower floor — 6000 or below. If you have changed spindle, this is the first field to revisit. **Always check your values here; these are generic common limits in the provided files, but your mileage may vary and getting this wrong can damage your spindle!**
+
+### These should be accurate but do not affect output today
+
+Nothing outside the machine model, the Machine editor and the validator reads these on a 3-axis machine (see "Things that are not what they look like"). They do not change posted G-code, but they are not ignored either: FreeCAD's `Machine/models/validate.py` errors on any linear or rotary axis whose `min_limit >= max_limit`, and warns about keys in the file the loader does not read. The Machine editor runs it on load. So set them correctly — a future release may go further.
+
+| Field | Where it comes from |
+|---|---|
+| `machine.axes.X/Y/Z.limits.min` and `.max` | RRF `M208` — your configured soft limits, usually a few mm inside nominal travel |
+| `machine.axes.X/Y/Z.max_velocity` | RRF `M203` — varies with motors, drive voltage and leadscrew versus ballscrew, so two nominally identical machines can differ |
+| `machine.toolheads[0].max_power_kw` | spindle manufacturer's docs |
+| `machine.toolheads[0].coolant_mist` / `coolant_flood` | whether you run air blast, mist or flood (note: air as a distinct cooling mode is not currently supported in FreeCAD machine posts) |
+
+> **Note**: `limits.min` must be strictly less than `limits.max` or the definition fails validation.
+
+To read the firmware values, send `M208` and `M203` with no parameters in the nxt console. `M203` takes and reports mm/min, which is what the `.fcm` wants — but the object model (`M409 K"move.axes[0]"`) reports `speed` in mm/s, so multiply by 60 if you read it that way. Also check whether your `config.g` pulls in sub-files with `M98 P"..."`; the values you want may not be in the main file.
+
+### Workflow preferences, not machine facts
+
+These sit in `postprocessor.properties` and are yours to set: `probe_mode` (`AT_START`, `ON_CHANGE`, `NONE`), `home_before_start`, `vssc` with `vssc_period` and `vssc_variance`, `output_tools`, `output_job_setup`, and `allow_zero_rpm`. The shipped values are `ON_CHANGE` probing, homing on, VSSC on at 4000 ms / 200 rpm. Change these to match your needs!
+
+One field is deliberately zero and worth understanding before changing: `toolheads[0].toolhead_wait` is `0.0` because this post emits `M3.9`, which already blocks until the spindle reaches speed. Setting it non-zero adds a `G4` dwell on top, so you would wait twice. Raise it only if your spindle genuinely does not reach speed by the time `M3.9` returns (if you have run the nxt config wizard, this should not be the case).
+
+### Leave these alone unless you know why
+
+Everything in the "Machine definition settings" table below was arrived at by diffing output against the legacy post, and several break the G-code if reverted — `filter_inefficient_moves` deletes rapids, `duplicates.commands` strips the command word off `M4000` lines. That section gives the reason for each.
 
 ---
 
@@ -30,7 +86,9 @@ FreeCAD expects post processors to follow the `<prefix>_post.py` naming conventi
 
 ## Installing the machine post
 
-1. **Post processor** → copy `nxt_machine_post.py` onto FreeCAD's post search path; the macro directory is the usual choice (`~/.local/share/FreeCAD/v<version>/Macro/`).
+1. **Post processor** → copy `nxt_machine_post.py` onto FreeCAD's post search path; the macro directory is the usual choice (on Linux, `~/.local/share/FreeCAD/v<version>/Macro/`). You can also find it by opening the FreeCAD Macros dialog (menu Macro → Macros); the path is shown as User Macros Location at the bottom of the dialog:
+
+   ![FreeCAD Execute Macro dialog](media/image.png)
 
    **Do not rename this file.** `PostProcessorFactory.get_post_processor()` resolves the class as the filename minus `_post.py`, title-cased — `nxt_machine` → `Nxt_Machine`. A versioned filename would not be a valid identifier, the factory would silently fall back to `WrapperPost`, and posting fails with *"The script does not have an 'export' function"*. This is why the release ships it unversioned while the legacy post keeps its `nxt-<version>_post.py` name.
 
@@ -42,7 +100,9 @@ FreeCAD expects post processors to follow the `<prefix>_post.py` naming conventi
                    + os.path.join(p, "nxt_machine_post.py") for p in PP.searchPathsPost()))
    ```
 
-2. **Machine definitions** → copy the `.fcm` files into `<CAM asset path>/Machines/`. The default asset path is `FreeCAD.getUserAppDataDir()/CamAssets`; check yours with `Path.Preferences.getAssetPath()`.
+2. **Machine definitions** → copy the `.fcm` files into `<CAM asset path>/Machines/`. Check the values against your own machine first — see "Check these against your machine". The default asset path is `FreeCAD.getUserAppDataDir()/CamAssets`; check yours with `Path.Preferences.getAssetPath()`.
+
+   > **Note**: this path can also be configured. If you can, create a repo for your CAM assets and point FreeCAD at it — that version-controls not just the machine definitions but the rest of your CAM setup, which is especially worth doing if you work on multiple computers.
 
 3. **Restart FreeCAD.** Confirm the post is classified correctly (Python console):
 
@@ -53,7 +113,7 @@ FreeCAD expects post processors to follow the `<prefix>_post.py` naming conventi
 
    If it reports `unknown`, the module raised on import and the classifier swallowed the traceback. The 26.3 machine post API is a moving target, so FreeCAD changes during its development cycle can break this.
 
-4. **In the CAM Job**, set Machine to `Milo V1.5`, `Milo V2.0` or `Miley V2.0`. The postprocessor comes from the machine definition, not from the job.
+4. **In the CAM Job**, set Machine to the entry matching your machine, e.g. `Miley V2.0`. The postprocessor comes from the machine definition, not from the job. It can be set in the Job settings panel on the General tab, or in the job properties view.
 
 5. **Check `nxt_version`** in the machine definition matches your firmware line. The machine post reads it from there, not from `RELEASE.VERSION`. Since v0.7.0, `M4005` compares **major.minor only** (`macros/utilities/M4005.g`), so the shipped `v0.7.0` value covers `v0.7.0-beta.N`, `v0.7.0-rcN` and `v0.7.x` firmware without re-exporting — but crossing a line (0.6 → 0.7) still aborts. The post refuses to post at all if the value is still the `%%NXT_VERSION%%` build placeholder, rather than emitting a bad `M4005`.
 
@@ -82,7 +142,7 @@ Both fixes the legacy post gained on this line are carried here:
 - **Explicit G1 to arc start after a plane change** (upstream `32d18b0`). RRF takes an arc's start point from the live machine pose rather than from the command, so after a plane change a modal axis word suppressed as unchanged can leave an out-of-plane axis stale and the arc starts from the wrong point. Implemented in `_force_arc_start_after_plane_change()`, porting legacy's `onplane()` / `_forceArcStartPose()` pair: X and Y are restated (never Z, covering the G18→G17 scallop lead-in), once per plane change.
 
   **It runs at text level, after suppression, and that ordering is load-bearing.** The restated pose is by definition the current position, so `suppress_redundant_axes_words()` would strip every axis word and leave a bare `G1`. Both `_optimize_gcode()` branches therefore call it after their own suppression pass, and the base is then invoked with suppression disabled. If you refactor `_optimize_gcode()`, preserve that order.
-- **4-decimal axis output** (upstream `42cc6d0`, `AXIS_DECIMALS = 4`, "to satisfy RRF G2/G3 arc tolerance"). Handled via `output.precision.axis: 4` in all three machine definitions — `dist/verify-post-processor-naming.sh` asserts it, since reverting to 3 reintroduces the defect.
+- **4-decimal axis output** (upstream `42cc6d0`, `AXIS_DECIMALS = 4`, "to satisfy RRF G2/G3 arc tolerance"). Handled via `output.precision.axis: 4` in every shipped machine definition — `dist/verify-post-processor-naming.sh` asserts it, since reverting to 3 reintroduces the defect.
 
 ---
 
@@ -110,6 +170,7 @@ nxt-specific:
 - **`_convert_spindle_command`** — appends the `.9` wait suffix (`M3.9`, `M5.9`) so RRF blocks until the spindle is at speed.
 - **`_convert_fixture`** — park before a WCS change, optional probe, M5011.
 - **`_convert_coolant_command`** — adds the descriptive comment. The M-codes themselves come from `Path/Op/Base.py`, not from the post (see below).
+- **`_delay_leading_z`** — defers a leading Z-only move until after the first XY move of each operation. **This one matters for safety**, see below.
 - **`get_sanity_checks`** — warns on rotary axes, multiple spindles and a disabled version check.
 
 Compatibility and correctness fixes, each traced to a specific base-class behaviour:
@@ -119,11 +180,23 @@ Compatibility and correctness fixes, each traced to a specific base-class behavi
 - **`_convert_rapid_move`** — strips `F` from `G0`, and drops a rapid whose axis words were all removed as unchanged. The base's `F_FOR_RAPID_MOVES` check sits in the `elif` of the duplicate-parameter test, so it is unreachable when `output.duplicates.parameters` is false.
 - **`_convert_arc_move`** — drops zero-valued `I`/`J`/`K`. The legacy post marked arc offsets `Control.NONZERO`; without this every G17-plane arc carries a spurious `K0`.
 - **`_convert_modal_command`** — drops `G80`, `G98`, `G99` (see the divergence table above), and labels `G17`/`G18`/`G19` the way the legacy post does.
-- **`_convert_item_commands` / `_optimize_gcode`** — defers the leading Z-only approach move until after the first XY move, and applies per-operation axis-word suppression. The deferral matters most after a tool change: nxt has parked, so the machine sits high and over the toolsetter, and descending to clearance *before* traversing would put the traverse at clearance height straight through whatever is between — the toolsetter included.
+- **`_convert_item_commands` / `_optimize_gcode`** — defers the leading Z-only approach move until after the first XY move, and applies per-operation axis-word suppression. See below.
+
+---
+
+## The approach move after a tool change
+
+FreeCAD emits the approach as `G0 Z5` then `G0 X.. Y..`. After a tool change nxt has parked, so the machine sits high and over the toolsetter. Descending to clearance *before* traversing means the descent happens at the park position and the traverse then happens at clearance height — straight through whatever is between, the toolsetter included (ask me how I know).
+
+`_delay_leading_z()` reorders this to XY first, so the traverse stays at the high park height and the descent happens only once above the target. This is the legacy post's `delayed_z` / `xy_seen` behaviour, reset per operation. The held move is flushed before the next *move*, not immediately after the XY, so a coolant-on between them still precedes the descent.
+
+Two deliberate differences from the legacy post: only pure-Z moves are deferred, where legacy deferred any move whose Z changed and so would swallow a combined XYZ move; and anything still held at the end of an operation is flushed rather than dropped, where legacy resets `delayed_z = None` and silently discards it.
 
 ---
 
 ## Two upstream FreeCAD issues worth being aware of
+
+> **Note**: FreeCAD 26.3 is in active development and very much a moving target, so these may change with future builds.
 
 ### 1. Suppressing M6 disables the only modal reset
 
@@ -159,10 +232,12 @@ A non-standard mode such as nxt's `M7.1` air blast (`macros/coolant/M7.1.g`) wil
 Worth knowing before changing anything here.
 
 - **Coolant M-codes come from FreeCAD, not the post.** `Path/Op/Base.py` inserts `M7`/`M8`/`M9` into the operation's Path around the first and last `GCODE_MOVE`, based on `obj.CoolantMode`. The post only labels them. This is why the machine post contains no coolant emission code at all and still produces correct coolant output.
-- **Most machine-definition fields are descriptive only.** Nothing in the CAM module outside the model class and the Machine editor reads axis `limits`, `max_velocity`, `role`, `parent`, `coolant_flood` or `coolant_mist` for a 3-axis machine. The rotary path generators are the only consumers. Fill them in accurately anyway — a future release may start using them.
+- **Most machine-definition fields are descriptive only.** Nothing in the CAM module outside the model class and the Machine editor reads axis `limits`, `max_velocity`, `role`, `parent`, `coolant_flood`, `coolant_mist` or `max_power_kw` for a 3-axis machine. The rotary path generators are the only consumers. Fill them in accurately anyway — a future release may start using them.
 - **The spindle `min_rpm`/`max_rpm` are not descriptive.** `Path/Tool/FeedsSpeeds/resolver.py` clamps the calculated speed into that range and scales feeds by the same ratio to hold chipload constant. Raising `min_rpm` therefore raises feeds for anything that lands on the floor.
 - **`_make_postable(label, [])` is not a dedup barrier.** It builds an item with a non-`None` but empty `Path`, so `_edit_command_list()` takes the `if item.path` branch, iterates zero commands and never calls `edit_fn`.
 - **`supported_commands` is substring-matched.** `convert_command_to_gcode()` does `command.Name not in supported` where `supported` is a newline-joined *string*, so `M3` matches inside `M30`.
+- **There is now a `.fcm` validator.** The Machine editor has a **Validate** button for it, and it also runs on load. It checks axis limit ordering, the kinematic chain, that the referenced postprocessor resolves and that its property keys are known, and it reports keys in the file that the loader silently ignored. Worth running after hand-editing a definition.
+- **`_optimize_duplicates_doubles()` may not exist.** Duplicate suppression moved between the postable stage and the G-code-string stage during the 26.x cycle. This port targets the string stage, via `_optimize_gcode()`. If an override here appears to do nothing, check the method actually exists in your build before assuming the logic is wrong.
 
 ---
 
@@ -182,9 +257,9 @@ These are not FreeCAD defaults; each was arrived at by comparing output against 
 | `output.precision.axis` | `4` | matches the legacy post's `AXIS_DECIMALS = 4`, required for RRF G2/G3 arc tolerance |
 | `toolheads[0].toolhead_wait` | `0.0` | `M3.9` already blocks; a `G4` dwell would double the wait |
 
-Axis limits and feedrates come from RRF `M208` and `M203`. Miley is set to the configured soft limits (305 X, 200 Y, 120 Z), not nominal travel. Milo carries nominal travel (348 X, 210 Y) and **should be replaced with real `M208` values** before use.
+The settings above are post behaviour and apply to every machine. The per-machine values — axis limits, rapids, spindle range — are all nominal and are covered in "Check these against your machine".
 
-Only Milo V1.5, Milo V2.0 and Miley V2.0 have definitions here. `macros/nxt-config/machine/` also carries configs for `v1.6`, `v1.6_v2` and `atlas` — add `.fcm` files for those if you need them.
+The shipped definitions cover every machine pack in `macros/nxt-config/machine/` apart from `custom`: Milo V1.5, V1.6 and V2.0, and Miley V2.0. Note that the travels here are the published nominal figures, not the placeholder `M208` values in those packs — set both from your own machine.
 
 ---
 
@@ -216,10 +291,10 @@ The `G17`/`G18`/`G19` arc-start restatement is implemented, so plane-changing jo
 
 `_force_arc_start_after_plane_change()` has unit coverage for its text handling (pose tracking across suppressed axis words, once-per-plane-change firing, X/Y-only restatement, multi-line entries) but **has never run inside FreeCAD**. Post a plane-changing job — a 3D surface or scallop operation, which is what produces `G18`/`G19` — and confirm each first arc after a plane change is preceded by a `G1` carrying real X/Y values and not a bare `G1`.
 
-Additionally, no test job has exercised **multiple fixtures/WCSs** or **probing operations** in either repo. `_convert_fixture()`'s park-before-change branch and its multiline return have never run.
+Additionally, no test job has exercised **multiple fixtures/WCSs** or **probing operations** in either repo. `_convert_fixture()`'s park-before-change branch and its multiline return have never run. The same goes for 4th-axis support — also a moving target in FreeCAD, though support for it is baked into the machine definitions.
 
 ---
 
 ## Before you cut
 
-Dry-run the first real job above the work.
+The MillenniumOS port this tracks has been tested over a dozen jobs there, but no combination of action and config can be covered, and **nothing here has been run against nxt firmware**. **Dry-run the first real job above the workpiece so you don't break anything!**
