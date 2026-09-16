@@ -119,9 +119,14 @@ PLANE_COMMANDS = ("G17", "G18", "G19")
 PLANE_NAMES = {"G17": "XY", "G18": "XZ", "G19": "YZ"}
 ARC_COMMANDS = ("G2", "G02", "G3", "G03")
 
-# Matches an axis word and keeps its value as text, so a restated pose is
-# byte-identical to how this post already emitted it (no reformatting drift).
-AXIS_WORD_RE = re.compile(r"([XYZ])\s*(-?(?:\d+\.?\d*|\.\d+))", re.IGNORECASE)
+# Axis words a restated arc start carries. X and Y only, never Z, matching the
+# legacy FreeCAD post. Note nxt.cps restates the two in-plane axes instead
+# (X/Z for G18, Y/Z for G19); the two posts differ here deliberately for now.
+ARC_START_AXES = ("X", "Y")
+
+# Marks the G1 this post injects ahead of an arc, so _convert_linear_move()
+# knows to emit it in full rather than let it be suppressed as a no-op.
+ARC_START_ANNOTATION = "nxt_arc_start"
 
 # Commands treated as motion when reordering the approach at operation start.
 MOVE_COMMANDS = (
@@ -523,12 +528,8 @@ class NxtMachine(PostProcessor):
         super()._expand_prefix(postables)
 
     # ------------------------------------------------------------------
-    # Command conversion hooks
+    # Expansion-stage hooks
     # ------------------------------------------------------------------
-
-    #: Sentinel emitted at operation / tool-change / fixture boundaries and
-    #: consumed by _optimize_gcode(). Never reaches the output file.
-    MODAL_BARRIER_MARKER = "(NXT-MODAL-BARRIER)"
 
     @staticmethod
     def _delay_leading_z(commands):
@@ -583,28 +584,49 @@ class NxtMachine(PostProcessor):
         result.extend(held)
         return result
 
-    def _convert_item_commands(self, item, gcode_lines) -> None:
-        """Reorder the approach, and mark boundaries for _optimize_gcode()."""
-        item_type = getattr(item, "item_type", None)
+    def _expand_xy_before_z(self, postables):
+        """Reorder each operation's approach so the Z descent follows the XY move.
 
-        if item_type in ("operation", "tool_controller", "fixture"):
-            gcode_lines.append(self.MODAL_BARRIER_MARKER)
+        Runs in the expansion stage, before _optimize_duplicates_doubles(), so
+        the axis-word deduplication that follows sees the final command order.
 
-        if item_type == "operation" and item.path and item.path.Commands:
-            reordered = self._delay_leading_z(list(item.path.Commands))
-            if reordered != list(item.path.Commands):
-                item.path = Path.Path(reordered)
+        The base implementation only decomposes a *combined* XYZ move into XY
+        then Z, and only for the first move after a tool change. FreeCAD emits
+        the approach as two separate moves ("G0 Z5" then "G0 X.. Y.."), which
+        that pass leaves untouched, so the deferral here is still needed. It is
+        also applied whether or not xy_before_z_after_tool_change is set: the
+        base method is gated on that flag internally, this is not.
+        """
+        super()._expand_xy_before_z(postables)
 
-        return super()._convert_item_commands(item, gcode_lines)
+        for _, sublist in postables:
+            for item in sublist:
+                if getattr(item, "item_type", None) != "operation":
+                    continue
+                if not item.path or not item.path.Commands:
+                    continue
+                commands = list(item.path.Commands)
+                reordered = self._delay_leading_z(commands)
+                if reordered != commands:
+                    item.path = Path.Path(reordered)
 
-    @staticmethod
-    def _update_pose_from_line(pose, line):
-        """Record any X/Y/Z words on `line` into `pose`, as text."""
-        for axis, value in AXIS_WORD_RE.findall(line):
-            pose[axis.upper()] = value
+    def _optimize_duplicates_doubles(self, postables):
+        """Deduplicate as the base does, then inject the arc-start restatements.
 
-    def _force_arc_start_after_plane_change(self, lines):
-        """Emit an explicit G1 to the arc start after a G17/G18/G19.
+        Order matters. The injected moves restate the pose the machine is
+        already at, so anything that strips unchanged axis words would reduce
+        them to a bare "G1", which the base then drops entirely as a move with
+        no parameters. Running after the base's pass keeps their axis words:
+        modal_axis() never sees them.
+
+        The second suppression pass, in _convert_move() against
+        machine_state.previous, is handled in _convert_linear_move().
+        """
+        super()._optimize_duplicates_doubles(postables)
+        self._force_arc_start_after_plane_change(postables)
+
+    def _force_arc_start_after_plane_change(self, postables):
+        """Insert an explicit G1 to the arc start after a G17/G18/G19.
 
         RRF takes an arc's start point from the live machine pose rather than
         from the command, so after a plane change a modal axis word that was
@@ -613,119 +635,52 @@ class NxtMachine(PostProcessor):
         in-plane start with a G1 immediately before the first arc pins it.
 
         This ports the legacy post's onplane() / _forceArcStartPose() pair
-        (upstream 32d18b0). Like legacy it restates X and Y only, never Z --
-        that covers the G18->G17 scallop lead-in -- and it fires once per
-        plane change.
+        (upstream 32d18b0). Like legacy it restates X and Y only, never Z,
+        and it fires once per plane change. The Fusion post restates the two
+        in-plane axes instead; see the ARC_START_AXES comment.
 
-        Runs at text level, deliberately, and only AFTER suppression: the
-        restated pose is by definition equal to the current position, so
-        suppress_redundant_axes_words() would strip every axis word off it
-        and leave a bare "G1". Callers must therefore invoke this after their
-        suppression pass, and the base must then be called with suppression
-        disabled -- which _optimize_gcode() already arranges.
-
-        Values are carried through as the original text, so the injected move
-        matches the surrounding output exactly rather than being reformatted.
-        Comments are written with "(" to match the rest of this post and the
-        machine definitions shipped with it.
+        The pose is accumulated rather than read per command, because this runs
+        after deduplication: a command carries an axis word only when that axis
+        changed, so the last seen value for each axis is the current one.
         """
-        out = []
-        pose = {"X": None, "Y": None, "Z": None}
-        plane_changed = False
 
-        for entry in lines:
-            # Entries may hold several physical lines (see _convert_fixture),
-            # so flatten. Rejoining with the configured EOL is unaffected.
-            for line in str(entry).split("\n"):
-                stripped = line.strip()
-                # Ignore trailing comments when reading axis words.
-                code = stripped.split("(", 1)[0].split(";", 1)[0].strip()
-                word = code.split(" ", 1)[0].upper() if code else ""
-
-                if word in PLANE_COMMANDS:
-                    plane_changed = True
-                    out.append(line)
-                    continue
-
-                if word in ARC_COMMANDS and plane_changed:
-                    plane_changed = False
-                    restated = [
-                        "{}{}".format(axis, pose[axis])
-                        for axis in ("X", "Y")
-                        if pose[axis] is not None
-                    ]
-                    if restated:
-                        out.append("(Confirm start before arc after plane change)")
-                        out.append("G1 " + " ".join(restated))
-
-                # Track the pose AFTER any injection, so the restated point is
-                # the one established by the preceding moves, not this arc's end.
-                if code:
-                    self._update_pose_from_line(pose, code)
-
-                out.append(line)
-
-        return out
-
-    def _optimize_gcode(self, gcode_lines):
-        """Suppress redundant axis words per operation rather than across the whole job.
-
-        GcodeProcessingUtils.suppress_redundant_axes_words() tracks position
-        across the entire body and resets only on an M6 line. This post
-        suppresses M6 (nxt services tool changes in firmware from a
-        bare T word), so the reset never fires. Position is then tracked across
-        a park and tool change, and a retract such as "G0 Z5" at the start of an
-        operation is dropped as redundant, leaving a bare "G0" -- no retract
-        before the following XY rapid. The legacy post avoids this by calling
-        _forceAll() in onoperation(), ontoolchange() and onfixture().
-
-        Here the body is split at the boundary markers emitted by
-        _convert_item_commands(), each segment is suppressed independently, and
-        the base is then called with suppression disabled so it is not redone
-        across the whole body.
-        """
-        marker = self.MODAL_BARRIER_MARKER
-
-        def strip_markers(lines):
-            return [ln for ln in lines if ln.strip() != marker]
-
-        if not gcode_lines:
-            return super()._optimize_gcode(gcode_lines)
-
-        # Suppression already off: markers just need removing. The arc-start
-        # restatement is still required -- it is about RRF's arc semantics,
-        # not about deduplication.
-        if self.values.get("OUTPUT_DOUBLES"):
-            return super()._optimize_gcode(
-                self._force_arc_start_after_plane_change(strip_markers(gcode_lines))
+        def edit(section_name, item, command, section_state):
+            state = section_state.setdefault(
+                "nxt_arc_start", {"pose": {}, "after_plane_change": False}
             )
+            pose = state["pose"]
+            name = command.Name
 
-        from Path.Post.GcodeProcessingUtils import suppress_redundant_axes_words
+            if name in PLANE_COMMANDS:
+                state["after_plane_change"] = True
+                return None, None
 
-        split_at = self._optimize_start or 0
-        header = strip_markers(gcode_lines[:split_at])
-        body = gcode_lines[split_at:]
+            injected = None
+            if name in ARC_COMMANDS and state["after_plane_change"]:
+                state["after_plane_change"] = False
+                restated = {
+                    axis: pose[axis] for axis in ARC_START_AXES if pose.get(axis) is not None
+                }
+                if restated:
+                    injected = Path.Command(
+                        "G1", restated, {ARC_START_ANNOTATION: True}
+                    )
 
-        suppressed = []
-        segment = []
-        for line in body:
-            if line.strip() == marker:
-                suppressed.extend(suppress_redundant_axes_words(segment))
-                segment = []
-            else:
-                segment.append(line)
-        suppressed.extend(suppress_redundant_axes_words(segment))
+            # Track the pose AFTER deciding, so the restated point is the one
+            # established by the preceding moves, not this arc's end point.
+            for axis, value in command.Parameters.items():
+                if axis in ARC_START_AXES or axis == "Z":
+                    pose[axis] = value
 
-        # Must follow suppression: see _force_arc_start_after_plane_change().
-        suppressed = self._force_arc_start_after_plane_change(suppressed)
+            if injected is None:
+                return None, None
 
-        # Base would otherwise run the same suppression across the whole body.
-        saved = self.values["OUTPUT_DOUBLES"]
-        self.values["OUTPUT_DOUBLES"] = True
-        try:
-            return super()._optimize_gcode(header + suppressed)
-        finally:
-            self.values["OUTPUT_DOUBLES"] = saved
+            return -1, [
+                Path.Command("(Confirm start before arc after plane change)"),
+                injected,
+            ]
+
+        self._edit_command_list(postables, edit)
 
     def _reset_modal_state(self):
         """Force every tracked modal to re-emit on the next command.
@@ -810,6 +765,37 @@ class NxtMachine(PostProcessor):
             return None
 
         return gcode
+
+    def _convert_linear_move(self, command: Path.Command) -> str:
+        """Emit an injected arc-start G1 in full, not as a no-op.
+
+        _convert_move() drops a parameter whose value matches
+        machine_state.previous, and the whole line once nothing is left. An
+        arc-start restatement is by definition the position the machine is
+        already at, so left alone it would be suppressed away completely --
+        which is the bug it exists to prevent.
+
+        `previous` is a plain dict rebuilt by MachineState.addCommand() before
+        each conversion, so blanking the two axes for the duration of this call
+        is enough; it is restored anyway on the next command.
+        """
+        if not command.Annotations.get(ARC_START_ANNOTATION):
+            return super()._convert_linear_move(command)
+
+        previous = getattr(getattr(self, "machine_state", None), "previous", None)
+        if not isinstance(previous, dict):
+            Path.Log.error(
+                "nxt: machine_state.previous unavailable, arc start may be "
+                "suppressed. Check the first arc after each plane change."
+            )
+            return super()._convert_linear_move(command)
+
+        saved = {axis: previous[axis] for axis in ARC_START_AXES if axis in previous}
+        previous.update(dict.fromkeys(saved, None))
+        try:
+            return super()._convert_linear_move(command)
+        finally:
+            previous.update(saved)
 
     def _convert_arc_move(self, command: Path.Command) -> str:
         """Drop zero-valued I/J/K from arcs.

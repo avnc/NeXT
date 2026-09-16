@@ -6,6 +6,14 @@ Both can be installed at the same time, so you can post the same job through eac
 
 Targets the **nxt v0.7.0** line.
 
+> ## Minimum FreeCAD build: weekly 2026.09.02
+>
+> Upstream commit [`493bba9e42`](https://github.com/FreeCAD/FreeCAD/commit/493bba9e42) ("switch to Path.Command line-numbering and optimization", authored 2026-07-14, merged late August) **removed `_optimize_gcode()` from `Path/Post/Processor.py`**. Optimization moved from the G-code-string stage to the Path.Command stage, and no string-stage hook replaced it.
+>
+> This post used to hang its axis-word suppression and its arc-start restatement off `_optimize_gcode()`. On any build carrying that commit the override was simply never called, so the arc-start fix silently vanished from the output and the `(NXT-MODAL-BARRIER)` sentinel leaked into the file. It was verified missing from the 2026.09.02, 2026.09.09 and 2026.09.16 weekly AppImages.
+>
+> **Both are now ported to the command-stage API** (see "Parity with the legacy post's v0.7.0 fixes"). The consequence is that this post now *requires* the new pipeline: it calls `_optimize_duplicates_doubles()`, which older 26.3 dev builds do not have, and will raise `AttributeError` on them. Use a weekly from 2026.09.02 onward. FreeCAD 1.0/1.1 users were never served by this post anyway — use the legacy one.
+
 ## Files
 
 | File | Post name in FreeCAD | Purpose |
@@ -71,7 +79,7 @@ One field is deliberately zero and worth understanding before changing: `toolhea
 
 ### Leave these alone unless you know why
 
-Everything in the "Machine definition settings" table below was arrived at by diffing output against the legacy post, and several break the G-code if reverted — `filter_inefficient_moves` deletes rapids, `duplicates.commands` strips the command word off `M4000` lines. That section gives the reason for each.
+Everything in the "Machine definition settings" table below was arrived at by diffing output against the legacy post, and several break the G-code if reverted — `duplicates.commands` strips the command word off `M4000` lines, and `filter_inefficient_moves` deletes rapids whenever upstream wires it back up. That section gives the reason for each.
 
 ---
 
@@ -139,9 +147,16 @@ nxt's `G80.g` / `G98.g` / `G99.g` maintain real modal state (`global.nxtCannedCy
 
 Both fixes the legacy post gained on this line are carried here:
 
-- **Explicit G1 to arc start after a plane change** (upstream `32d18b0`). RRF takes an arc's start point from the live machine pose rather than from the command, so after a plane change a modal axis word suppressed as unchanged can leave an out-of-plane axis stale and the arc starts from the wrong point. Implemented in `_force_arc_start_after_plane_change()`, porting legacy's `onplane()` / `_forceArcStartPose()` pair: X and Y are restated (never Z, covering the G18→G17 scallop lead-in), once per plane change.
+- **Explicit G1 to arc start after a plane change** (upstream `32d18b0`). RRF takes an arc's start point from the live machine pose rather than from the command, so after a plane change a modal axis word suppressed as unchanged can leave an out-of-plane axis stale and the arc starts from the wrong point. Implemented in `_force_arc_start_after_plane_change()`, porting legacy's `onplane()` / `_forceArcStartPose()` pair: X and Y are restated, never Z, once per plane change.
 
-  **It runs at text level, after suppression, and that ordering is load-bearing.** The restated pose is by definition the current position, so `suppress_redundant_axes_words()` would strip every axis word and leave a bare `G1`. Both `_optimize_gcode()` branches therefore call it after their own suppression pass, and the base is then invoked with suppression disabled. If you refactor `_optimize_gcode()`, preserve that order.
+  **X/Y-only is a deliberate match to the legacy FreeCAD post, and it differs from the Fusion post.** `nxt.cps` restates the two *in-plane* axes — X/Y for `G17`, X/Z for `G18`, Y/Z for `G19`. Both FreeCAD posts restate X/Y whatever the plane, which covers a `G18`→`G17` transition but leaves Z unstated when entering an `XZ` arc. See "Not yet covered".
+
+  **The restatement has to survive two separate suppression passes, and that is most of its design.** It restates the pose the machine is already at, so anything that strips unchanged axis words reduces it to a bare `G1`, which the base then drops as a move with no parameters — the exact silent failure it exists to prevent.
+
+  - `modal_axis()` strips duplicate axis words at the Path.Command stage, in `_optimize_duplicates_doubles()`. Handled by injecting *after* that pass: this post overrides `_optimize_duplicates_doubles()`, calls `super()` first and injects second, so the deduplicator never sees the injected moves. Pose is accumulated rather than read per command, because by then a command carries an axis word only when that axis changed.
+  - `_convert_move()` strips them again at conversion, comparing against `machine_state.previous`. Handled in `_convert_linear_move()`: the injected move carries an annotation, and for that command only, the two axis entries in `previous` are blanked for the duration of the call and restored afterwards.
+
+  If you refactor either method, keep that split. An injected move that reaches `modal_axis()`, or that converts without the bypass, comes out as a bare `G1` and silently does nothing.
 - **4-decimal axis output** (upstream `42cc6d0`, `AXIS_DECIMALS = 4`, "to satisfy RRF G2/G3 arc tolerance"). Handled via `output.precision.axis: 4` in every shipped machine definition — `dist/verify-post-processor-naming.sh` asserts it, since reverting to 3 reintroduces the defect.
 
 ---
@@ -180,7 +195,9 @@ Compatibility and correctness fixes, each traced to a specific base-class behavi
 - **`_convert_rapid_move`** — strips `F` from `G0`, and drops a rapid whose axis words were all removed as unchanged. The base's `F_FOR_RAPID_MOVES` check sits in the `elif` of the duplicate-parameter test, so it is unreachable when `output.duplicates.parameters` is false.
 - **`_convert_arc_move`** — drops zero-valued `I`/`J`/`K`. The legacy post marked arc offsets `Control.NONZERO`; without this every G17-plane arc carries a spurious `K0`.
 - **`_convert_modal_command`** — drops `G80`, `G98`, `G99` (see the divergence table above), and labels `G17`/`G18`/`G19` the way the legacy post does.
-- **`_convert_item_commands` / `_optimize_gcode`** — defers the leading Z-only approach move until after the first XY move, and applies per-operation axis-word suppression. See below.
+- **`_convert_item_commands`** — defers the leading Z-only approach move until after the first XY move. Still live. Note that the base now deduplicates axis words *before* conversion, so this reorder happens after suppression; it is safe because a pure-Z move and an XY move touch disjoint axes, so swapping them cannot invalidate a suppression decision.
+- **`_optimize_duplicates_doubles`** — deduplicates as the base does, then injects the arc-start restatements after it. See "Parity with the legacy post's v0.7.0 fixes" for why that order is not negotiable.
+- **`_convert_linear_move`** — emits an injected arc-start move in full instead of letting conversion suppress it back to a bare `G1`.
 
 ---
 
@@ -194,11 +211,33 @@ Two deliberate differences from the legacy post: only pure-Z moves are deferred,
 
 ---
 
-## Two upstream FreeCAD issues worth being aware of
+## Upstream FreeCAD issues worth being aware of
 
-> **Note**: FreeCAD 26.3 is in active development and very much a moving target, so these may change with future builds.
+> **Note**: FreeCAD 26.3 is in active development and very much a moving target, so these may change with future builds. Last checked against `origin/main` at `a4ce44d33b` (2026-09-14) and the 2026.09.16 weekly AppImage.
 
-### 1. Suppressing M6 disables the only modal reset
+### 1. Suppressing M6 disables the only modal reset — *fixed upstream, workaround now obsolete*
+
+**This no longer applies as described.** It is kept because the workaround is still in the post, and because the same hazard could return if the pipeline moves again.
+
+`suppress_redundant_axes_words()` still exists in `GcodeProcessingUtils.py`, but since `493bba9e42` nothing in the CAM module calls it — its only remaining references are its own unit tests. Deduplication now happens on `Path.Command` objects, in `PathOptimizationUtils.modal_axis()`, and `_deduplicate()` there treats two things as modal barriers:
+
+```python
+if previous_command and (
+    previous_command.Name in Constants.MCODE_TOOL_CHANGE
+    or previous_command.Annotations.get(Constants.ANNOT_MODAL_BARRIER, False)
+):
+    previous_command = None
+```
+
+That fixes the hazard for this post. The original problem was that suppression ran on *output lines*, where our tool change has already been rendered as a bare `T` word, so the `M6` reset never fired. The new stage runs before conversion, where the `M6` command object is still in the stream, so the barrier fires correctly. `_reset_modal_state()` covers the second suppression pass, which `_convert_move()` still does at conversion time against `machine_state.previous`.
+
+`Constants.ANNOT_MODAL_BARRIER` is also the overridable reset hook this section used to ask for. Nothing upstream sets it yet, but a post can, which makes it the right replacement for this post's sentinel-comment approach.
+
+### 1b. `_optimize_gcode()` is gone
+
+Covered in the warning at the top of this file. The short version: `493bba9e42` deleted the string-stage optimization hook, `export2()` now runs `_optimize_duplicates_doubles()` and `_add_line_numbers()` over postables and then converts, and `_convert_job_sections()` joins the resulting lines with no optimization pass at all. Any override of `_optimize_gcode()` is now dead code — this post's has been ported, but FreeCAD still ships one in its own `opensbp_post.py`, whose `super()._optimize_gcode()` call would raise `AttributeError` if anything called it.
+
+The per-operation axis-word suppression that override also carried is simply gone, not ported: it worked around issue 1 above, which upstream has now fixed properly.
 
 FreeCAD's `GcodeProcessingUtils.suppress_redundant_axes_words()` tracks position across the whole G-code body and resets **only** on a line starting with `M6`/`M06`:
 
@@ -213,7 +252,7 @@ Worked around here by emitting a sentinel comment at each operation, tool-change
 
 The legacy post avoids this entirely by calling `_forceAll()` in `onoperation()`, `ontoolchange()` and `onfixture()`.
 
-### 2. Coolant M-codes are hardcoded
+### 2. Coolant M-codes are hardcoded — *still true*
 
 FreeCAD's `Constants.py` hardcodes the coolant on/off commands:
 
@@ -234,10 +273,13 @@ Worth knowing before changing anything here.
 - **Coolant M-codes come from FreeCAD, not the post.** `Path/Op/Base.py` inserts `M7`/`M8`/`M9` into the operation's Path around the first and last `GCODE_MOVE`, based on `obj.CoolantMode`. The post only labels them. This is why the machine post contains no coolant emission code at all and still produces correct coolant output.
 - **Most machine-definition fields are descriptive only.** Nothing in the CAM module outside the model class and the Machine editor reads axis `limits`, `max_velocity`, `role`, `parent`, `coolant_flood`, `coolant_mist` or `max_power_kw` for a 3-axis machine. The rotary path generators are the only consumers. Fill them in accurately anyway — a future release may start using them.
 - **The spindle `min_rpm`/`max_rpm` are not descriptive.** `Path/Tool/FeedsSpeeds/resolver.py` clamps the calculated speed into that range and scales feeds by the same ratio to hold chipload constant. Raising `min_rpm` therefore raises feeds for anything that lands on the floor.
-- **`_make_postable(label, [])` is not a dedup barrier.** It builds an item with a non-`None` but empty `Path`, so `_edit_command_list()` takes the `if item.path` branch, iterates zero commands and never calls `edit_fn`.
+- **`_make_postable(label, [])` is not a dedup barrier.** Still true, and it matters more now: `_edit_command_list(all_postables=True)` calls `edit_fn(..., cmd=None, ...)` for a postable *without* a path, and that `None` is what `_optimize_duplicates_doubles()` treats as a barrier. An empty-contents postable gets a non-`None` but empty `Path`, and `Path.Path` defines no `__bool__` or `__len__`, so `if item.path` is true, the loop iterates zero commands, and `edit_fn` is never called at all. A marker built this way is invisible to both branches. A `str` postable, such as the ones `_expand_prefix()` makes from `PREAMBLE`, *is* a barrier.
 - **`supported_commands` is substring-matched.** `convert_command_to_gcode()` does `command.Name not in supported` where `supported` is a newline-joined *string*, so `M3` matches inside `M30`.
 - **There is now a `.fcm` validator.** The Machine editor has a **Validate** button for it, and it also runs on load. It checks axis limit ordering, the kinematic chain, that the referenced postprocessor resolves and that its property keys are known, and it reports keys in the file that the loader silently ignored. Worth running after hand-editing a definition.
-- **`_optimize_duplicates_doubles()` may not exist.** Duplicate suppression moved between the postable stage and the G-code-string stage during the 26.x cycle. This port targets the string stage, via `_optimize_gcode()`. If an override here appears to do nothing, check the method actually exists in your build before assuming the logic is wrong.
+- **Duplicate suppression has moved twice, and it moved back.** It ran on postables, then on G-code strings (`_optimize_gcode()`), and since `493bba9e42` it runs on postables again (`_optimize_duplicates_doubles()`, plus a second pass at conversion against `machine_state.previous`). This post targets the current arrangement and nothing older. If an override here appears to do nothing, check the method still exists in your build before assuming the logic is wrong.
+- **`processing.f_for_rapid_moves` in a `.fcm` is silently dropped.** In `Machine/models/machine.py`, `ProcessingOptions.f_for_rapid_moves = False` has no type annotation, so it is a plain class attribute rather than a dataclass field: `from_dict()` never reads it, `to_dict()` never writes it, and the validator reports it as an ignored key. `_merge_machine_config()` then reads the hardcoded class default. It happens to be `False`, which is what we want, but the `.fcm` value is not what is producing that. The `f` really is kept off `G0` by `_convert_rapid_move()` in this post. (Pre-existing, not part of the recent refactor.)
+- **`processing.filter_inefficient_moves` currently does nothing.** `_optimize_g0()` is defined but never called from `export2()`, and as written it would raise `NameError` on an undefined `cmd` if it were. `collapse_g0()` has no live caller. Leave the setting `false` regardless — the method will presumably be wired back up, and `Constants.ANNOT_NO_COLLAPSE_G0` now exists to mark individual rapids as salient.
+- **There are now command annotations worth knowing about.** `Constants.ANNOT_MODAL_BARRIER` (do not dedup across this command), `ANNOT_ALLOW_UNSUPPORTED` (skip the `supported_commands` check for this command) and `ANNOT_NO_COLLAPSE_G0`. They are per-`Path.Command` and survive into the optimization stage, which makes them a cleaner mechanism than this post's marker comments.
 
 ---
 
@@ -247,9 +289,9 @@ These are not FreeCAD defaults; each was arrived at by comparing output against 
 
 | Setting | Value | Why |
 |---|---|---|
-| `processing.filter_inefficient_moves` | `false` | `collapse_g0()` removed ~1500 rapids on a test job, including the XY approach before every operation |
+| `processing.filter_inefficient_moves` | `false` | `collapse_g0()` removed ~1500 rapids on a test job, including the XY approach before every operation. Currently unwired upstream — keep it `false` anyway, it will come back |
 | `processing.translate_drill_cycles` | `false` | nxt implements G73/G81/G83 natively |
-| `processing.f_for_rapid_moves` | `false` | legacy emits no `F` on `G0` |
+| `processing.f_for_rapid_moves` | `false` | legacy emits no `F` on `G0`. The `.fcm` key is dropped by the loader (see below); `_convert_rapid_move()` is what actually enforces this |
 | `output.duplicates.commands` | `true` | means "emit the command word every line"; `false` suppressed the `M4000` prefix on repeated lines, producing bare parameter lines RRF would reject |
 | `output.duplicates.parameters` | `false` | suppress unchanged axis words, as legacy does |
 | `output.comments.symbol` | `"("` | `;` produces a file mixing both styles |
@@ -283,13 +325,19 @@ Verified in the MillenniumOS port across three jobs (5-tool profiling, a 107k-li
 - **One extra `M9`** before `G27`. Legacy's pre-park coolant-off is conditional on coolant being on; this one is unconditional. A no-op when coolant is already off. Remove `M9` from `postprocessor.properties.postamble` for an exact match.
 - **Approach ordering.** No longer a difference. `_delay_leading_z()` defers a leading Z-only move until after the first XY move, matching legacy (`G0 X.. Y..` then `G0 Z5`). One refinement over legacy: only *pure*-Z moves are deferred, so a combined XYZ move is left alone, where legacy deferred any move whose Z changed.
 
-The `G17`/`G18`/`G19` arc-start restatement is implemented, so plane-changing jobs should now match legacy on that point — but see the coverage note below.
+The `G17`/`G18`/`G19` arc-start restatement is implemented and reaches the output again, so plane-changing jobs should match legacy on that point — but see the coverage note below.
+
+Those equivalence results predate the `493bba9e42` refactor, so they describe a pipeline that no longer exists. Suppression now happens on `Path.Command` objects rather than output text, which can shift which axis words survive. The comparison is worth re-running on a current build.
 
 ### Not yet covered
 
 **Nothing in this port has been verified against nxt firmware on real hardware.** The equivalence above was established for MillenniumOS, not nxt.
 
-`_force_arc_start_after_plane_change()` has unit coverage for its text handling (pose tracking across suppressed axis words, once-per-plane-change firing, X/Y-only restatement, multi-line entries) but **has never run inside FreeCAD**. Post a plane-changing job — a 3D surface or scallop operation, which is what produces `G18`/`G19` — and confirm each first arc after a plane change is preceded by a `G1` carrying real X/Y values and not a bare `G1`.
+`_force_arc_start_after_plane_change()` has unit coverage for its command handling (pose accumulation across deduplicated axis words, once-per-plane-change firing, X/Y-only restatement, ordering against the real `modal_axis()`, and the conversion-stage bypass) but **has never run inside FreeCAD**. It also fires more rarely than you might assume: **no FreeCAD CAM operation emits `G18`/`G19` as a side effect of its toolpath.** Grepping the CAM module, the only operation that emits plane-select codes at all is **Shape**, which has an explicit `ArcPlane` property (`None`/`Auto`/`Variable`) and an `EmitPreamble` flag. ThreadMilling, Slot, Surface and Waterline emit arcs, but in the active plane without switching it. So a plane change reaches this post from a Shape op, or from hand-written G-code in a Custom op.
+
+To exercise it, either use a Shape op with `ArcPlane` set to `Variable` and `EmitPreamble` on, or add a **Custom op** with `PostProcessOutput` **on**, containing a move, then `G18`, then a `G3` with `I`/`K`. With that flag on, `Path/Op/Custom.py` turns each line into a real `Path.Command`, which is what this pass matches on; lines prefixed with `!`, or the whole op with `PostProcessOutput` off, become as-is annotations with an empty command name and bypass the post entirely. Confirm each first arc after a plane change is preceded by a `G1` carrying real X/Y values and not a bare `G1`.
+
+**The restated axes may be wrong for `G18`/`G19`.** Both FreeCAD posts restate X and Y whatever the plane. The arc's `I`/`J`/`K` offsets are relative to its start point *in the arc's own plane*, so entering an `XZ` arc arguably wants X and Z restated, which is what `nxt.cps` does. The FreeCAD behaviour is what legacy has always done and its comment cites a `G18`→`G17` transition, where X/Y is the right pair. Worth resolving across all three posts rather than diverging further — the restatement is a no-op move to the current pose either way, so adding the third axis is cheap.
 
 Additionally, no test job has exercised **multiple fixtures/WCSs** or **probing operations** in either repo. `_convert_fixture()`'s park-before-change branch and its multiline return have never run. The same goes for 4th-axis support — also a moving target in FreeCAD, though support for it is baked into the machine definitions.
 
