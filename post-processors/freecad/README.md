@@ -22,13 +22,14 @@ Targets the **nxt v0.7.0** line.
 | `nxt_machine_post.py` | `nxt_machine` | machine-flow port |
 | `machines/*.fcm` | — | machine definitions, see below |
 | `tools/compare_gcode.py` | — | semantic diff between the two posts' output |
+| `tools/post_cli.py` | — | post a job to G-code headlessly, without the GUI |
 
 ### Included machine definitions
 
 | File | Machine name | Travels (X/Y/Z) | Rapids (X/Y/Z) |
 |---|---|---|---|
 | `machines/Milo_V1.5.fcm` | Milo V1.5 | 340 / 160 / 120 | 2000 / 2000 / 1000 |
-| `machines/Milo_V1.6.fcm` | Milo V1.6 (beta) | 300 / 160 / 120 | 2000 / 2000 / 1000 |
+| `machines/Milo_V1.6.fcm` | Milo V1.6 beta | 300 / 160 / 120 | 2000 / 2000 / 1000 |
 | `machines/Milo_V2.0.fcm` | Milo V2.0 | 348 / 210 / 120 | 2000 / 2000 / 1000 |
 | `machines/Miley_V2.0.fcm` | Miley V2.0 | 308 / 210 / 120 | 2000 / 2000 / 1000 |
 
@@ -302,6 +303,62 @@ These are not FreeCAD defaults; each was arrived at by comparing output against 
 The settings above are post behaviour and apply to every machine. The per-machine values — axis limits, rapids, spindle range — are all nominal and are covered in "Check these against your machine".
 
 The shipped definitions cover every machine pack in `macros/nxt-config/machine/` apart from `custom`: Milo V1.5, V1.6 and V2.0, and Miley V2.0. Note that the travels here are the published nominal figures, not the placeholder `M208` values in those packs — set both from your own machine.
+
+---
+
+## Posting from the command line
+
+`tools/post_cli.py` posts a job without opening the GUI, so test G-code can be
+regenerated in a loop or from CI. Run it with plain `python3`; it finds a
+FreeCAD console binary and re-execs itself under it.
+
+```sh
+# what is in the file
+tools/post_cli.py --list job.FCStd
+
+# post using the working tree: this repo's post module and this repo's .fcm
+tools/post_cli.py job.FCStd -M machines/Milo_V1.6.fcm -o out.gcode
+
+# the legacy post, for comparison runs
+tools/post_cli.py job.FCStd -p nxt_legacy -o legacy.gcode
+```
+
+Two things make this useful for testing rather than just convenient:
+
+- **`--post-dir`** is prepended to FreeCAD's post search path, and defaults to
+  this repo. `searchPathsPost()` normally puts the user Macro directory first,
+  so without this a run would silently exercise whatever was last synced there
+  instead of the working tree.
+- **`-M/--machine-file`** loads a `.fcm` straight off disk and injects it into
+  the processor, bypassing the CAM asset store. Together with `--post-dir` a
+  run touches no installed copy of either half of the post.
+
+Jobs are recomputed before posting, so toolpaths are regenerated rather than
+read from whatever was cached in the document.
+
+### Choosing which job to post
+
+A document with several jobs posts all of them unless told otherwise. `-j`
+takes the job **label** — what the CAM tree shows — and is repeatable:
+
+```sh
+# both jobs -> bookmark_Top.gcode and bookmark_Bottom.gcode
+tools/post_cli.py bookmark.FCStd -M machines/Milo_V1.6.fcm -o bookmark.gcode
+
+# just one, written to exactly the name given
+tools/post_cli.py bookmark.FCStd -j Top -M machines/Milo_V1.6.fcm -o top.gcode
+```
+
+The output name is only decorated when one run produces more than one file, so
+a single `-j` gives you exactly the `-o` path. The internal object name (`Job`,
+`Job001`) is also accepted, which is how you disambiguate duplicate labels. An
+unmatched `-j` lists the labels that do exist and exits non-zero, as does any
+other failure.
+
+FreeCAD is located in this order: `$FREECADCMD`, then the newest
+`~/Downloads/FreeCAD_weekly-*.AppImage`, then `freecadcmd` on `PATH`. The
+machine flow needs a weekly from 2026.09.02 onward, so a 1.1 stable
+`freecadcmd` on `PATH` will not work — it has no `Machine` module.
 
 ---
 
