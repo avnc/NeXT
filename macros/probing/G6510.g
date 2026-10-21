@@ -158,7 +158,8 @@ else
                 set var.surfVal = { (var.x0 + var.x1) / 2 }
             else
                 set var.surfVal = { var.x0 + (var.x1 - var.x0) * (var.startY - var.y0) / var.dy }
-            set var.thetaDeg = { degrees(atan2(var.x1 - var.x0, var.y1 - var.y0)) }
+            ; X face runs along Y — measure skew from +Y (matches nxt-corner-intersect angX − 90°)
+            set var.thetaDeg = { degrees(atan2(var.y1 - var.y0, var.x1 - var.x0)) - 90 }
             if { var.thetaDeg > 90 }
                 set var.thetaDeg = { var.thetaDeg - 180 }
             elif { var.thetaDeg <= -90 }
