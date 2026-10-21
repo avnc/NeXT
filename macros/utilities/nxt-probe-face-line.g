@@ -116,25 +116,19 @@ if { var.nPts == 1 }
 if { param.A == 0 }
     G6550 X{param.W} Y{param.K + var.alongSense * var.d1}
     G6512 X{param.T} I{var.probeId} F{var.feedRate} R{var.retries}
-    M5000
-    set global.nxtProbeHitXY[2] = { global.nxtLastProbeResult }
-    set global.nxtProbeHitXY[3] = { global.nxtAbsPos[1] }
     G6550 X{param.W} Y{param.K + var.alongSense * var.d2}
     G6512 X{param.T} I{var.probeId} F{var.feedRate} R{var.retries}
     M5000
-    set global.nxtProbeHitXY[4] = { global.nxtLastProbeResult }
-    set global.nxtProbeHitXY[5] = { global.nxtAbsPos[1] }
+    set global.nxtProbeHitXY[2] = { global.nxtLastProbeResult }
+    set global.nxtProbeHitXY[3] = { global.nxtAbsPos[1] }
 else
     G6550 X{param.J + var.alongSense * var.d1} Y{param.W}
+    G6512 Y{param.T} I{var.probeId} F{var.feedRate} R{var.retries}
+    G6550 X{param.J + var.alongSense * var.d2} Y{param.W}
     G6512 Y{param.T} I{var.probeId} F{var.feedRate} R{var.retries}
     M5000
     set global.nxtProbeHitXY[2] = { global.nxtAbsPos[0] }
     set global.nxtProbeHitXY[3] = { global.nxtLastProbeResult }
-    G6550 X{param.J + var.alongSense * var.d2} Y{param.W}
-    G6512 Y{param.T} I{var.probeId} F{var.feedRate} R{var.retries}
-    M5000
-    set global.nxtProbeHitXY[4] = { global.nxtAbsPos[0] }
-    set global.nxtProbeHitXY[5] = { global.nxtLastProbeResult }
 
 set global.nxtFaceLineN = 3
 echo "nxt-probe-face-line: 3-pt face complete"
