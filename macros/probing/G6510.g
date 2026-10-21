@@ -194,17 +194,25 @@ if { var.probeAxis != 2 }
 
 echo "G6510: Index " ^ var.pSlot ^ " " ^ move.axes[var.probeAxis].letter ^ "=" ^ var.surfVal
 
+; X/Y: return to jog start like MOS G6513 — protected XY at probe Z, then up.
+; Before the WCS write, and no-travel apply: M6520 would G53 G1 the tip onto the face.
+if { var.probeAxis == 0 || var.probeAxis == 1 }
+    G6550 X{var.startX} Y{var.startY}
+    if { var.hasL }
+        G6550 Z{var.startZ}
+    echo "G6510: Returned to start X=" ^ var.startX ^ " Y=" ^ var.startY ^ " Z=" ^ var.startZ
+
 if { exists(param.U) && param.U != null }
     if { var.probeAxis == 0 }
         if { exists(param.Q) && param.Q != null }
-            M6520 P{var.pSlot} W{param.U} X1 Q{param.Q}
+            M98 P"nxt-wcs-apply.g" I{var.pSlot} W{param.U} X1 Q{param.Q}
         else
-            M6520 P{var.pSlot} W{param.U} X1
+            M98 P"nxt-wcs-apply.g" I{var.pSlot} W{param.U} X1
     elif { var.probeAxis == 1 }
         if { exists(param.Q) && param.Q != null }
-            M6520 P{var.pSlot} W{param.U} Y1 Q{param.Q}
+            M98 P"nxt-wcs-apply.g" I{var.pSlot} W{param.U} Y1 Q{param.Q}
         else
-            M6520 P{var.pSlot} W{param.U} Y1
+            M98 P"nxt-wcs-apply.g" I{var.pSlot} W{param.U} Y1
     elif { var.probeAxis == 2 }
         if { exists(param.Q) && param.Q != null }
             M6520 P{var.pSlot} W{param.U} Z1 Q{param.Q}
