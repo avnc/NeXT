@@ -12,22 +12,13 @@
 ; NO PARAMETERS - called automatically by RRF
 ;
 ; Operator Cancel in tpre/tfree: skip measure. Do not abort (abort in
-; tool-change macros leaves Tn / Changing Tool stuck). When a job is active,
-; request M25; pause.g cancels it after the T stack has returned. Outside a job,
-; clear the cancel flag and return normally. Do not issue T — nested T re-runs tpre.
+; tool-change macros leaves Tn / Changing Tool stuck). Soft-fail → echo,
+; clear nxtToolChangeState, M99. Do not issue T — nested T re-runs tpre.
 
 if { exists(global.nxtToolChangeCancelled) && global.nxtToolChangeCancelled }
-    var nxtCancelJob = false
-    if { exists(job.file.fileName) && job.file.fileName != null }
-        if { job.file.fileName != "" }
-            set var.nxtCancelJob = true
+    set global.nxtToolChangeCancelled = false
     set global.nxtToolChangeState = null
-    if { var.nxtCancelJob }
-        echo "tpost.g: tool change cancelled — stopping job after T stack"
-        M25
-    else
-        set global.nxtToolChangeCancelled = false
-        echo "tpost.g: tool change cancelled — skip measure"
+    echo "tpost.g: tool change cancelled — skip measure"
     M99
 
 ; Validate that tpre.g completed properly (soft skip — never abort)
