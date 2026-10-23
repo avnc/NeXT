@@ -378,6 +378,29 @@
     "probing": {
       "caption": "Probing"
     },
+    "protectedMovement": {
+      "caption": "Machine Movement",
+      "protected": "Protected · Probe {0}",
+      "noProbes": "No supported touch probes are configured.",
+      "configureProbe": "Set nxtTouchProbeID to a configured type 5–8 probe before jogging.",
+      "homeAll": "Home all axes before protected jogging.",
+      "homeAllButton": "Home all",
+      "moveNeedsHomeProbe": "Home all axes and configure a supported touch probe before jogging.",
+      "targetOutOfBounds": "Target {0}={1} is outside machine limits.",
+      "wcs": "Work coordinate system",
+      "set": "Set {0}",
+      "setZero": "Set WCS zero",
+      "goZero": "Go to WCS zero",
+      "homeAxis": "Home {0}",
+      "homeAxisShort": "Home {0}",
+      "setAxisZero": "Set {0} to zero",
+      "moveBy": "Move {1} by {0} mm",
+      "compensation": "Compensation",
+      "runBed": "Run bed compensation (G32)",
+      "runMesh": "Probe mesh (G29)",
+      "loadMesh": "Load mesh",
+      "disableMesh": "Disable mesh compensation"
+    },
     "probingCycles": {
       "title": "Probing Cycles",
       "targetWcs": "Target WCS",

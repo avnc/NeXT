@@ -29,6 +29,7 @@ import i18n from '@/i18n'
 // Import main components
 import nxt from './nxt.vue'
 import ToolManagementPanel from './components/panels/ToolManagementPanel.vue'
+import NxtDashboard from './components/panels/NxtDashboard.vue'
 import NxtShell from './layouts/NxtShell.vue'
 
 // Import component modules for their side effects (utility registrations only - Vue 3 has no
@@ -57,6 +58,7 @@ function registerNxtSideEffects(): void {
       id: 'nxt',
       caption: String(i18n.global.t('plugins.nxt.layout.caption')),
       takeoverOnFirstLoad: true,
+      routes: { '/': NxtDashboard, '/Dashboard': NxtDashboard },
     })
 
     registerPluginData('nxt', PluginDataType.globalSetting, 'nxtUiState', {

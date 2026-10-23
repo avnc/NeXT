@@ -1,0 +1,63 @@
+<style scoped>
+.macros-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+}
+</style>
+
+<template>
+  <v-row>
+    <v-col cols="12" class="pt-0 pb-0">
+      <ProtectedMovementPanel class="mb-2" />
+    </v-col>
+
+    <v-col cols="12" md="9">
+      <v-row density="compact">
+        <v-col v-if="!uiStore.isLaser" cols="12">
+          <SpindleSpeedPanel />
+        </v-col>
+        <v-col cols="12">
+          <v-card>
+            <v-card-text>
+              <JobProgress />
+            </v-card-text>
+          </v-card>
+        </v-col>
+        <v-col cols="4" class="flex-grow-1">
+          <JobControlPanel />
+        </v-col>
+        <v-col cols="4" class="flex-grow-1">
+          <BabystepPanel class="fill-height" />
+        </v-col>
+        <v-col cols="4" class="flex-grow-1">
+          <SpeedFactorPanel class="fill-height" />
+        </v-col>
+      </v-row>
+    </v-col>
+
+    <v-col v-if="mdAndUp" class="d-flex flex-column" md="3">
+      <div class="macros-wrap">
+        <MacroList />
+      </div>
+    </v-col>
+  </v-row>
+</template>
+
+<script setup lang="ts">
+import {
+  BabystepPanel,
+  JobControlPanel,
+  JobProgress,
+  MacroList,
+  SpeedFactorPanel,
+  SpindleSpeedPanel
+} from 'DuetWebControl/components'
+import { useUiStore } from '@/stores/ui'
+import ProtectedMovementPanel from './ProtectedMovementPanel.vue'
+import { useNxtDisplayBreakpoints } from '../../utils/useNxtDisplayBreakpoints'
+
+const { mdAndUp } = useNxtDisplayBreakpoints()
+const uiStore = useUiStore()
+</script>
